@@ -1,0 +1,5 @@
+venv/
+models/*.bin
+data/*.csv
+__pycache__/
+.env
