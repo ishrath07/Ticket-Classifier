@@ -1,9 +1,19 @@
 """
-generate_synthetic_data.py
-Generates a synthetic support-ticket dataset where the ticket text has
-REAL, learnable correlation with `category` and `urgency` labels
-(unlike the raw Kaggle dataset, whose text is templated filler unrelated
-to its labels).
+generate_synthetic_data.py (v2 — harder)
+Generates a synthetic support-ticket dataset designed so that classifying
+correctly requires understanding CONTEXT/IMPLICATION rather than spotting
+a single trigger keyword. This gives a contextual model (DistilBERT) real
+room to outperform a bag-of-words baseline (TF-IDF + LinearSVC).
+
+Key differences from v1:
+  - Urgency is signaled through CONSEQUENCES/SCENARIOS, not words like
+    "urgent"/"critical"/"low priority" (e.g. "I have a client demo in
+    10 minutes" implies Critical without ever saying "urgent").
+  - Category bodies include occasional HARD-NEGATIVE distractor phrases
+    that mention vocabulary from a different category, to punish naive
+    keyword matching.
+  - Heavier phrasing variation reduces exact n-gram overlap between
+    examples of the same class.
 
 Usage:
     python src/generate_synthetic_data.py
@@ -16,7 +26,7 @@ import pandas as pd
 
 random.seed(42)
 
-N_ROWS = 1200
+N_ROWS = 1400
 
 PRODUCTS = [
     "GoPro Hero", "Fitbit Charge", "Sony PlayStation", "Amazon Kindle",
@@ -24,98 +34,132 @@ PRODUCTS = [
     "Lenovo ThinkPad", "Roomba Robot Vacuum", "Adobe Photoshop", "Dropbox Plus",
 ]
 
-# --- Category-specific content: subject templates + body fragments ---
+# ---------------------------------------------------------------------------
+# Category content: bodies avoid a single fixed trigger word where possible,
+# and each category has "distractor" phrases borrowed from OTHER categories'
+# vocabulary, injected occasionally as hard negatives.
+# ---------------------------------------------------------------------------
 CATEGORY_CONTENT = {
     "Technical issue": {
         "subjects": ["App keeps crashing", "Device won't turn on", "Sync not working", "Login error", "Screen freezing"],
         "bodies": [
-            "The {product} keeps crashing every time I try to open it.",
-            "I can't log in to my {product} account, it keeps showing an error message.",
-            "My {product} freezes randomly and I have to restart it.",
-            "The {product} isn't syncing with my phone anymore.",
-            "I get an error code whenever I try to update my {product}.",
-            "The screen on my {product} went black and won't respond.",
+            "Every time I open the {product} it just shuts itself back down.",
+            "I can't get past the sign-in screen on my {product}, it just spins forever.",
+            "The {product} locks up randomly and I have to restart it to use it again.",
+            "My {product} stopped talking to my phone, nothing shows up when I try to connect them.",
+            "Something goes wrong every time I try to update the {product}, it never finishes.",
+            "The display on the {product} went completely black and nothing brings it back.",
+            "The {product} worked fine yesterday but now none of the buttons respond at all.",
+        ],
+        "distractors": [
+            "I did check my recent statement first, but that's unrelated to this.",
+            "I'm not asking for money back, I just want it to actually work.",
+            "I already know how to use the {product}, this isn't a how-to question.",
         ],
     },
     "Billing inquiry": {
         "subjects": ["Unexpected charge on my card", "Question about my invoice", "Subscription price changed", "Duplicate charge"],
         "bodies": [
-            "I was charged twice for my {product} subscription this month.",
-            "My invoice for {product} shows an amount I don't recognize.",
-            "The price for my {product} subscription increased without notice.",
-            "Can you explain why I was billed for {product} when I haven't used it?",
-            "I'd like to update the payment method on file for my {product} account.",
-            "There's a charge on my card for {product} that I don't remember authorizing.",
+            "There are two identical charges on my statement for the same {product} order.",
+            "The amount on my latest invoice for {product} doesn't match what I agreed to pay.",
+            "My {product} plan renewed at a higher rate than what I originally signed up for.",
+            "I don't recognize one of the line items tied to my {product} account this month.",
+            "I'd like to switch which card is used for my {product} payments going forward.",
+            "Something on my card statement references {product} but I can't tell what it's for.",
+        ],
+        "distractors": [
+            "The {product} itself works fine, this is purely about the charge.",
+            "I'm not trying to cancel anything, I just want the amount corrected.",
+            "This isn't a technical problem, the device is working as expected.",
         ],
     },
     "Refund request": {
         "subjects": ["Requesting a refund", "Want my money back", "Product not as described", "Refund for defective item"],
         "bodies": [
-            "The {product} arrived damaged and I'd like a full refund.",
-            "I'm not satisfied with my {product} and want my money back.",
-            "The {product} doesn't work as advertised, please process a refund.",
-            "I returned my {product} last week and I'm still waiting on my refund.",
-            "Please refund my purchase of the {product}, it's not what I expected.",
-            "I'd like to request a refund for the {product} I bought.",
+            "The {product} showed up with visible damage and I'd rather send it back than keep it.",
+            "This isn't what I expected from the {product} at all, I'd like to return it.",
+            "The {product} doesn't do what the listing said it would, I want to send it back.",
+            "I mailed my {product} back last week and haven't seen anything credited yet.",
+            "I'd like to return the {product} I bought and get my payment reversed.",
+            "The {product} arrived in the wrong condition, I'd rather get my money returned.",
+        ],
+        "distractors": [
+            "I'm not trying to cancel any ongoing plan, this was a one-time purchase.",
+            "It's not a technical glitch, the {product} just isn't a good fit for me.",
+            "There's no billing error here, I simply want to send the item back.",
         ],
     },
     "Cancellation request": {
         "subjects": ["Cancel my subscription", "Please cancel my order", "Stop my membership", "Discontinue service"],
         "bodies": [
-            "I want to cancel my {product} subscription effective immediately.",
-            "Please cancel my order for the {product}, I no longer need it.",
-            "I'd like to stop my {product} membership and avoid future charges.",
-            "Can you help me cancel my recurring {product} plan?",
-            "I no longer want the {product} service, please discontinue it.",
-            "Please cancel my account associated with {product}.",
+            "I'd like my {product} plan to stop renewing starting next cycle.",
+            "Please take my {product} order off the books, I no longer want it shipped.",
+            "I want to end my {product} membership and not be billed again.",
+            "Can you close out my recurring {product} plan for me?",
+            "I no longer need the {product} service going forward, please shut it down.",
+            "I'd like to be taken off the {product} plan entirely.",
+        ],
+        "distractors": [
+            "I'm not looking for a refund on past charges, just to stop future ones.",
+            "The {product} itself works fine, I just don't need it anymore.",
+            "This isn't a complaint about quality, I simply want to stop the service.",
         ],
     },
     "Product inquiry": {
         "subjects": ["Question about compatibility", "Does this support...", "Product specifications", "Availability question"],
         "bodies": [
-            "Does the {product} work with older versions of the app?",
-            "I'm curious if the {product} is compatible with Android devices.",
-            "What are the battery specifications for the {product}?",
-            "Is the {product} currently available in a larger size?",
-            "Can you tell me more about the warranty on the {product}?",
-            "I'm considering buying the {product} — does it support offline mode?",
+            "Before I buy, I'm wondering if the {product} works with older app versions.",
+            "Would the {product} pair properly with an Android phone?",
+            "How long does the battery last on the {product} under normal use?",
+            "Is a larger size of the {product} available anywhere right now?",
+            "What does the warranty actually cover on the {product}?",
+            "Does the {product} still function without an internet connection?",
+        ],
+        "distractors": [
+            "I haven't purchased it yet, so this isn't about a charge or refund.",
+            "Nothing is broken, I'm just trying to decide if it fits my needs.",
+            "I'm not cancelling anything, I don't even own one yet.",
         ],
     },
 }
 
-# --- Urgency-specific framing sentences, appended to the body ---
+# ---------------------------------------------------------------------------
+# Urgency: signaled through scenario/consequence, NOT explicit priority words.
+# This is the key change — a bag-of-words model has to rely on loose n-gram
+# correlations with time-pressure phrases, while a contextual model can
+# actually reason about what the scenario implies.
+# ---------------------------------------------------------------------------
 URGENCY_FRAMING = {
     "Critical": [
-        "This is completely blocking my work and I need it resolved immediately.",
-        "This is urgent — I'm losing money every hour this isn't fixed.",
-        "This is a critical issue affecting my entire team right now.",
-        "I need an emergency fix as soon as possible, this cannot wait.",
+        "I have a live client demo in the next ten minutes and this is what I'm using.",
+        "Our whole team is sitting idle right now because of this.",
+        "We're set to lose the contract if this isn't sorted before end of day.",
+        "Every minute this stays broken is costing us active customers.",
+        "This is the only thing standing between us and going live in front of investors this afternoon.",
     ],
     "High": [
-        "This is a significant problem and I'd appreciate a quick resolution.",
-        "I need this fixed soon, it's affecting my daily work.",
-        "This has been frustrating and I'd like it prioritized.",
-        "Please treat this as a high priority, it's causing real disruption.",
+        "I have a deadline first thing tomorrow morning and was counting on this.",
+        "This has been going on for two days now and it's starting to pile up.",
+        "I've got a big presentation later this week that depends on this working.",
+        "It's cutting into my work every single day until it's fixed.",
+        "A few of my colleagues are waiting on me because of this.",
     ],
     "Medium": [
-        "It's not blocking me completely, but I'd like it resolved soon.",
-        "This is a moderate inconvenience, please look into it when you can.",
-        "I'd appreciate a fix in the next few days if possible.",
-        "It's manageable for now, but I'd like this addressed.",
+        "It's not stopping me completely, but I'd like it looked at sometime this week.",
+        "I can work around it for now, but it would be nice to have it sorted soon.",
+        "It's a bit of a hassle but nothing is on fire because of it.",
+        "I'll manage until someone gets a chance to take a look.",
+        "It's annoying enough that I wanted to flag it, but it's not blocking anything major.",
     ],
     "Low": [
-        "No rush on this, just wanted to flag it.",
-        "This is a minor issue, whenever you get a chance is fine.",
-        "Just curious about this, not urgent at all.",
-        "Low priority, but wanted to check in about it.",
+        "There's no particular timeline on my end, just wanted to mention it.",
+        "I noticed this a while ago and it hasn't really affected anything for me.",
+        "Whenever someone has a spare moment is totally fine.",
+        "I'm mostly just curious, it's not something I need resolved quickly.",
+        "This has been sitting fine as-is, just thought I'd bring it up.",
     ],
 }
 
-CATEGORIES = list(CATEGORY_CONTENT.keys())
-URGENCIES = list(URGENCY_FRAMING.keys())
-
-# Neutral filler sentences with no category/urgency signal, added at random
-# to make the classification task less trivially keyword-based.
 NEUTRAL_FILLERS = [
     "I've been a customer for a couple of years now.",
     "Thanks in advance for your help.",
@@ -127,15 +171,17 @@ NEUTRAL_FILLERS = [
     "This happened a few days ago.",
 ]
 
-# A couple of the milder urgency phrasings sometimes get reused across
-# adjacent urgency levels, softening the boundary between High/Medium
-# and Medium/Low so the task isn't perfectly separable.
+# Soften the boundary between adjacent urgency levels so it isn't perfectly
+# separable even by scenario type alone.
 URGENCY_OVERLAP = {
-    "High": URGENCY_FRAMING["High"] + URGENCY_FRAMING["Medium"][:1],
-    "Medium": URGENCY_FRAMING["Medium"] + URGENCY_FRAMING["High"][-1:] + URGENCY_FRAMING["Low"][:1],
-    "Low": URGENCY_FRAMING["Low"] + URGENCY_FRAMING["Medium"][-1:],
     "Critical": URGENCY_FRAMING["Critical"],
+    "High": URGENCY_FRAMING["High"] + URGENCY_FRAMING["Critical"][-1:],
+    "Medium": URGENCY_FRAMING["Medium"] + URGENCY_FRAMING["High"][-1:],
+    "Low": URGENCY_FRAMING["Low"] + URGENCY_FRAMING["Medium"][-1:],
 }
+
+CATEGORIES = list(CATEGORY_CONTENT.keys())
+URGENCIES = list(URGENCY_FRAMING.keys())
 
 
 def generate_row(ticket_id: int) -> dict:
@@ -146,8 +192,6 @@ def generate_row(ticket_id: int) -> dict:
     content = CATEGORY_CONTENT[category]
     subject = random.choice(content["subjects"])
 
-    # Sometimes combine two body fragments from the category for more
-    # varied phrasing instead of always a single fixed sentence.
     if random.random() < 0.4:
         body = " ".join(random.sample(content["bodies"], 2)).format(product=product)
     else:
@@ -156,7 +200,14 @@ def generate_row(ticket_id: int) -> dict:
     framing = random.choice(URGENCY_OVERLAP[urgency])
 
     parts = [body, framing]
-    # Randomly inject 0-2 neutral filler sentences at random positions
+
+    # Hard negative: ~35% chance of injecting a distractor phrase from a
+    # different-category vocabulary domain, worded as a denial (so it's
+    # actively misleading for keyword matching).
+    if random.random() < 0.35:
+        distractor = random.choice(content["distractors"]).format(product=product)
+        parts.insert(random.randint(0, len(parts)), distractor)
+
     for _ in range(random.choice([0, 0, 1, 1, 2])):
         parts.insert(random.randint(0, len(parts)), random.choice(NEUTRAL_FILLERS))
 
